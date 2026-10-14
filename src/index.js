@@ -1,5 +1,5 @@
 import { Client, Events, GatewayIntentBits, MessageFlags, SlashCommandBuilder } from 'discord.js';
-import { GuildPlayer, formatDuration } from './player.js';
+import { GuildPlayer, LOOP_MODES, formatDuration } from './player.js';
 import { resolve } from './ytdlp.js';
 
 const { DISCORD_TOKEN, GUILD_ID } = process.env;
@@ -50,7 +50,6 @@ const aliases = {
   aleatorio: 'shuffle',
 };
 
-const loopModes = ['off', 'track', 'queue'];
 const loopLabels = { off: 'desactivado', track: '🔂 canción', queue: '🔁 cola' };
 const loopWords = {
   off: 'off', no: 'off', desactivado: 'off',
@@ -63,6 +62,18 @@ function modesLine(player) {
   if (player.loop !== 'off') modes.push(`loop: ${loopLabels[player.loop]}`);
   if (player.shuffle) modes.push('🔀 aleatorio');
   return modes.length ? `*${modes.join(' · ')}*\n` : '';
+}
+
+function nextLoopMode(player) {
+  return LOOP_MODES[(LOOP_MODES.indexOf(player.loop) + 1) % LOOP_MODES.length];
+}
+
+function queueText(player) {
+  const lines = [`${modesLine(player)}🎶 **${player.current.title}** \`${formatDuration(player.current.duration)}\``];
+  player.queue.slice(0, 10).forEach((t, i) => lines.push(`${i + 1}. ${t.title} \`${formatDuration(t.duration)}\``));
+  if (player.queue.length > 10) lines.push(`…y ${player.queue.length - 10} más`);
+  if (!player.queue.length) lines.push('*La cola está vacía*');
+  return lines.join('\n');
 }
 
 const client = new Client({
@@ -152,27 +163,24 @@ const handlers = {
   },
 
   queue(ctx, _voiceChannel, player) {
-    const lines = [`${modesLine(player)}🎶 **${player.current.title}** \`${formatDuration(player.current.duration)}\``];
-    player.queue.slice(0, 10).forEach((t, i) => lines.push(`${i + 1}. ${t.title} \`${formatDuration(t.duration)}\``));
-    if (player.queue.length > 10) lines.push(`…y ${player.queue.length - 10} más`);
-    return ctx.reply(lines.join('\n'));
+    return ctx.reply(queueText(player));
   },
 
   loop(ctx, _voiceChannel, player) {
     let mode;
     if (!ctx.arg) {
-      mode = loopModes[(loopModes.indexOf(player.loop) + 1) % loopModes.length];
+      mode = nextLoopMode(player);
     } else {
       const word = ctx.arg.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
       mode = Object.hasOwn(loopWords, word) ? loopWords[word] : null;
       if (!mode) return ctx.reply(`Usa \`${PREFIX}loop cancion\`, \`${PREFIX}loop cola\` o \`${PREFIX}loop off\``);
     }
-    player.loop = mode;
+    player.setLoop(mode);
     return ctx.reply(`Loop: ${loopLabels[mode]}`);
   },
 
   shuffle(ctx, _voiceChannel, player) {
-    player.shuffle = !player.shuffle;
+    player.setShuffle(!player.shuffle);
     return ctx.reply(player.shuffle ? '🔀 Modo aleatorio activado owo' : 'Modo aleatorio desactivado');
   },
 
@@ -212,6 +220,46 @@ async function run(name, ctx) {
   }
 }
 
+// Buttons on the "now playing" message. The player edits the message itself to reflect the new state.
+async function onButton(interaction) {
+  const action = interaction.customId.slice('music:'.length);
+  const player = players.get(interaction.guildId);
+  const whisper = (content) => interaction.reply({ content, flags: MessageFlags.Ephemeral });
+
+  try {
+    // Leftover buttons, e.g. from before a restart.
+    if (!player?.current || player.panel?.id !== interaction.message.id) {
+      return await interaction.update({ components: [] });
+    }
+    if (interaction.member.voice.channelId !== player.channelId) {
+      return await whisper('Tienes que estar en mi canal de voz');
+    }
+    if (action === 'queue') return await whisper(queueText(player));
+
+    await interaction.deferUpdate();
+    switch (action) {
+      case 'toggle':
+        if (player.paused) player.resume();
+        else player.pause();
+        break;
+      case 'skip':
+        player.skip();
+        break;
+      case 'stop':
+        player.stop();
+        break;
+      case 'loop':
+        player.setLoop(nextLoopMode(player));
+        break;
+      case 'shuffle':
+        player.setShuffle(!player.shuffle);
+        break;
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
 client.once(Events.ClientReady, async (c) => {
   // Guild commands appear instantly; global ones can take a while to propagate.
   if (GUILD_ID) await c.application.commands.set(commands, GUILD_ID);
@@ -220,7 +268,9 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, (interaction) => {
-  if (!interaction.isChatInputCommand() || !interaction.inCachedGuild()) return;
+  if (!interaction.inCachedGuild()) return;
+  if (interaction.isButton() && interaction.customId.startsWith('music:')) return onButton(interaction);
+  if (!interaction.isChatInputCommand()) return;
   if (!Object.hasOwn(handlers, interaction.commandName)) return;
   return run(interaction.commandName, fromInteraction(interaction));
 });

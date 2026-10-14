@@ -8,9 +8,11 @@ import {
   entersState,
   joinVoiceChannel,
 } from '@discordjs/voice';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { createStream } from './ytdlp.js';
 
 const IDLE_TIMEOUT_MS = 5 * 60_000;
+export const LOOP_MODES = ['off', 'track', 'queue'];
 
 export function formatDuration(seconds) {
   if (!seconds) return 'en vivo';
@@ -38,6 +40,9 @@ export class GuildPlayer {
     // Set for the current track so #next knows why it ended.
     this.skipped = false;
     this.failed = false;
+    // The "now playing" message whose buttons control the player. Only the latest one keeps them.
+    this.panel = null;
+    this.panelSeq = 0;
 
     this.audio = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
     this.audio.on(AudioPlayerStatus.Idle, () => this.#next());
@@ -49,6 +54,11 @@ export class GuildPlayer {
 
   get channelId() {
     return this.connection?.joinConfig.channelId ?? null;
+  }
+
+  get paused() {
+    const { status } = this.audio.state;
+    return status === AudioPlayerStatus.Paused || status === AudioPlayerStatus.AutoPaused;
   }
 
   async connect(voiceChannel) {
@@ -105,17 +115,32 @@ export class GuildPlayer {
   }
 
   pause() {
-    return this.audio.pause();
+    const ok = this.audio.pause();
+    if (ok) this.refreshPanel();
+    return ok;
   }
 
   resume() {
-    return this.audio.unpause();
+    const ok = this.audio.unpause();
+    if (ok) this.refreshPanel();
+    return ok;
+  }
+
+  setLoop(mode) {
+    this.loop = mode;
+    this.refreshPanel();
+  }
+
+  setShuffle(on) {
+    this.shuffle = on;
+    this.refreshPanel();
   }
 
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
     clearTimeout(this.idleTimer);
+    this.#clearPanel();
     this.queue = [];
     this.current = null;
     this.source?.kill();
@@ -126,6 +151,29 @@ export class GuildPlayer {
     }
     this.connection = null;
     this.onDestroy(this);
+  }
+
+  controls() {
+    const button = (id, emoji, active = false) =>
+      new ButtonBuilder()
+        .setCustomId(`music:${id}`)
+        .setEmoji(emoji)
+        .setStyle(active ? ButtonStyle.Primary : ButtonStyle.Secondary);
+
+    return [
+      new ActionRowBuilder().addComponents(
+        button('toggle', this.paused ? '▶️' : '⏸️', this.paused),
+        button('skip', '⏭️'),
+        button('stop', '⏹️'),
+        button('loop', this.loop === 'track' ? '🔂' : '🔁', this.loop !== 'off'),
+        button('shuffle', '🔀', this.shuffle),
+      ),
+      new ActionRowBuilder().addComponents(button('queue', '📜')),
+    ];
+  }
+
+  refreshPanel() {
+    this.panel?.edit({ components: this.controls() }).catch(() => {});
   }
 
   #next() {
@@ -152,6 +200,7 @@ export class GuildPlayer {
     }
 
     if (!this.current) {
+      this.#clearPanel();
       this.idleTimer = setTimeout(() => {
         this.#say('Me quedé solito sin música, me voy uwu');
         this.destroy();
@@ -166,7 +215,26 @@ export class GuildPlayer {
       this.#say(`No pude reproducir **${track.title}** ;w; (${e.message})`);
     });
     this.audio.play(createAudioResource(this.source.stream, { inputType: StreamType.OggOpus }));
-    if (!repeatTrack) this.#say(`🎶 Sonando: **${track.title}** \`${formatDuration(track.duration)}\``);
+    if (!repeatTrack) this.#showPanel(`🎶 Sonando: **${track.title}** \`${formatDuration(track.duration)}\``);
+  }
+
+  #showPanel(content) {
+    this.#clearPanel();
+    const seq = this.panelSeq;
+    this.textChannel
+      ?.send({ content, components: this.controls(), allowedMentions: { parse: [] } })
+      .then((message) => {
+        // The track may have changed while the message was being sent.
+        if (seq !== this.panelSeq) return message.edit({ components: [] });
+        this.panel = message;
+      })
+      .catch(() => {});
+  }
+
+  #clearPanel() {
+    this.panelSeq++;
+    this.panel?.edit({ components: [] }).catch(() => {});
+    this.panel = null;
   }
 
   #say(content) {

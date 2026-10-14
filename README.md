@@ -56,6 +56,8 @@ Todos funcionan como comando de barra (`/play`) y con prefijo (`!play`).
 | `stop` | | Detiene la música y vacía la cola |
 | `leave` | `!l` | Saca al bot del canal de voz |
 
+Cada vez que empieza una canción, el bot manda un mensaje con botones de reproductor: ⏸️ pausa/reanuda, ⏭️ salta, ⏹️ detiene, 🔁 cambia el loop, 🔀 activa el aleatorio y 📜 muestra la cola (solo a quien lo pulsa). Los botones solo aparecen en el mensaje de la canción actual y desaparecen del anterior cuando cambia.
+
 El bot se desconecta solo si se queda sin gente en el canal o tras 5 minutos sin música.
 
 Si YouTube deja de funcionar, actualiza yt-dlp (`brew upgrade yt-dlp` o `yt-dlp -U`).
