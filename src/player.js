@@ -31,10 +31,20 @@ export class GuildPlayer {
     this.connection = null;
     this.textChannel = null;
     this.idleTimer = null;
+    this.destroyed = false;
+    // 'off' | 'track' | 'queue'
+    this.loop = 'off';
+    this.shuffle = false;
+    // Set for the current track so #next knows why it ended.
+    this.skipped = false;
+    this.failed = false;
 
     this.audio = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
     this.audio.on(AudioPlayerStatus.Idle, () => this.#next());
-    this.audio.on('error', (e) => this.#say(`No pude reproducir **${this.current?.title}** ;w; (${e.message})`));
+    this.audio.on('error', (e) => {
+      this.failed = true;
+      this.#say(`No pude reproducir **${this.current?.title}** ;w; (${e.message})`);
+    });
   }
 
   get channelId() {
@@ -83,11 +93,14 @@ export class GuildPlayer {
 
   skip() {
     // Stopping triggers Idle, which starts the next track.
+    this.skipped = true;
     return this.audio.stop(true);
   }
 
   stop() {
     this.queue = [];
+    // Cleared first so loop mode doesn't put it back in the queue.
+    this.current = null;
     this.audio.stop(true);
   }
 
@@ -100,6 +113,8 @@ export class GuildPlayer {
   }
 
   destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
     clearTimeout(this.idleTimer);
     this.queue = [];
     this.current = null;
@@ -110,14 +125,31 @@ export class GuildPlayer {
       this.connection.destroy();
     }
     this.connection = null;
-    this.onDestroy(this.guild.id);
+    this.onDestroy(this);
   }
 
   #next() {
+    if (this.destroyed) return;
     this.source?.kill();
     this.source = null;
-    this.current = this.queue.shift() ?? null;
     clearTimeout(this.idleTimer);
+
+    const finished = this.current;
+    const replay = finished && !this.failed;
+    const repeatTrack = replay && this.loop === 'track' && !this.skipped;
+    this.skipped = false;
+    this.failed = false;
+
+    if (repeatTrack) {
+      this.current = finished;
+    } else {
+      const requeued = replay && this.loop === 'queue';
+      if (requeued) this.queue.push(finished);
+      // In shuffle mode, avoid replaying the track that just went back to the end.
+      const pool = requeued && this.queue.length > 1 ? this.queue.length - 1 : this.queue.length;
+      const index = this.shuffle ? Math.floor(Math.random() * pool) : 0;
+      this.current = this.queue.splice(index, 1)[0] ?? null;
+    }
 
     if (!this.current) {
       this.idleTimer = setTimeout(() => {
@@ -129,10 +161,12 @@ export class GuildPlayer {
 
     const track = this.current;
     this.source = createStream(track.url, (e) => {
-      if (this.current === track) this.#say(`No pude reproducir **${track.title}** ;w; (${e.message})`);
+      if (this.current !== track) return;
+      this.failed = true;
+      this.#say(`No pude reproducir **${track.title}** ;w; (${e.message})`);
     });
     this.audio.play(createAudioResource(this.source.stream, { inputType: StreamType.OggOpus }));
-    this.#say(`🎶 Sonando: **${track.title}** \`${formatDuration(track.duration)}\``);
+    if (!repeatTrack) this.#say(`🎶 Sonando: **${track.title}** \`${formatDuration(track.duration)}\``);
   }
 
   #say(content) {

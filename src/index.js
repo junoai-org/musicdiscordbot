@@ -19,12 +19,51 @@ const commands = [
   new SlashCommandBuilder().setName('resume').setDescription('Reanuda la música'),
   new SlashCommandBuilder().setName('queue').setDescription('Muestra la cola'),
   new SlashCommandBuilder().setName('nowplaying').setDescription('Muestra qué está sonando'),
+  new SlashCommandBuilder()
+    .setName('loop')
+    .setDescription('Repite la canción o la cola (sin opción, cambia al siguiente modo)')
+    .addStringOption((o) =>
+      o
+        .setName('modo')
+        .setDescription('Qué repetir')
+        .addChoices(
+          { name: 'Desactivado', value: 'off' },
+          { name: 'Canción', value: 'track' },
+          { name: 'Cola', value: 'queue' },
+        ),
+    ),
+  new SlashCommandBuilder().setName('shuffle').setDescription('Activa o desactiva el modo aleatorio'),
   new SlashCommandBuilder().setName('stop').setDescription('Detiene la música y vacía la cola'),
   new SlashCommandBuilder().setName('leave').setDescription('Saca al bot del canal de voz'),
 ].map((c) => c.setDMPermission(false).toJSON());
 
 // Short forms for prefix commands, e.g. !p instead of !play.
-const aliases = { p: 'play', s: 'skip', q: 'queue', np: 'nowplaying', r: 'resume', l: 'leave' };
+const aliases = {
+  p: 'play',
+  s: 'skip',
+  q: 'queue',
+  np: 'nowplaying',
+  r: 'resume',
+  l: 'leave',
+  repeat: 'loop',
+  random: 'shuffle',
+  aleatorio: 'shuffle',
+};
+
+const loopModes = ['off', 'track', 'queue'];
+const loopLabels = { off: 'desactivado', track: '🔂 canción', queue: '🔁 cola' };
+const loopWords = {
+  off: 'off', no: 'off', desactivado: 'off',
+  track: 'track', song: 'track', cancion: 'track', uno: 'track',
+  queue: 'queue', cola: 'queue', todo: 'queue', all: 'queue',
+};
+
+function modesLine(player) {
+  const modes = [];
+  if (player.loop !== 'off') modes.push(`loop: ${loopLabels[player.loop]}`);
+  if (player.shuffle) modes.push('🔀 aleatorio');
+  return modes.length ? `*${modes.join(' · ')}*\n` : '';
+}
 
 const client = new Client({
   intents: [
@@ -39,7 +78,9 @@ const players = new Map();
 function getPlayer(guild) {
   let player = players.get(guild.id);
   if (!player) {
-    player = new GuildPlayer(guild, (id) => players.delete(id));
+    player = new GuildPlayer(guild, (p) => {
+      if (players.get(p.guild.id) === p) players.delete(p.guild.id);
+    });
     players.set(guild.id, player);
   }
   return player;
@@ -51,7 +92,7 @@ function fromInteraction(interaction) {
     guild: interaction.guild,
     member: interaction.member,
     channel: interaction.channel,
-    query: interaction.options.getString('cancion'),
+    arg: interaction.options.getString('cancion') ?? interaction.options.getString('modo'),
     defer: () => interaction.deferReply(),
     reply(content, { ephemeral = false } = {}) {
       const payload = { content, allowedMentions: { parse: [] } };
@@ -61,12 +102,12 @@ function fromInteraction(interaction) {
   };
 }
 
-function fromMessage(message, query) {
+function fromMessage(message, arg) {
   return {
     guild: message.guild,
     member: message.member,
     channel: message.channel,
-    query,
+    arg,
     defer: () => message.channel.sendTyping().catch(() => {}),
     reply: (content) => message.reply({ content, allowedMentions: { parse: [], repliedUser: false } }),
   };
@@ -74,7 +115,7 @@ function fromMessage(message, query) {
 
 const handlers = {
   async play(ctx, voiceChannel) {
-    if (!ctx.query) return ctx.reply(`Dime qué quieres escuchar, p. ej. \`${PREFIX}play lofi\` >w<`);
+    if (!ctx.arg) return ctx.reply(`Dime qué quieres escuchar, p. ej. \`${PREFIX}play lofi\` >w<`);
 
     const existing = players.get(ctx.guild.id);
     if (existing?.current && existing.channelId !== voiceChannel.id) {
@@ -82,7 +123,7 @@ const handlers = {
     }
 
     await ctx.defer();
-    const tracks = await resolve(ctx.query);
+    const tracks = await resolve(ctx.arg);
     if (!tracks.length) return ctx.reply('No encontré nada ;w;');
 
     const player = getPlayer(ctx.guild);
@@ -111,15 +152,33 @@ const handlers = {
   },
 
   queue(ctx, _voiceChannel, player) {
-    const lines = [`🎶 **${player.current.title}** \`${formatDuration(player.current.duration)}\``];
+    const lines = [`${modesLine(player)}🎶 **${player.current.title}** \`${formatDuration(player.current.duration)}\``];
     player.queue.slice(0, 10).forEach((t, i) => lines.push(`${i + 1}. ${t.title} \`${formatDuration(t.duration)}\``));
     if (player.queue.length > 10) lines.push(`…y ${player.queue.length - 10} más`);
     return ctx.reply(lines.join('\n'));
   },
 
+  loop(ctx, _voiceChannel, player) {
+    let mode;
+    if (!ctx.arg) {
+      mode = loopModes[(loopModes.indexOf(player.loop) + 1) % loopModes.length];
+    } else {
+      const word = ctx.arg.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
+      mode = Object.hasOwn(loopWords, word) ? loopWords[word] : null;
+      if (!mode) return ctx.reply(`Usa \`${PREFIX}loop cancion\`, \`${PREFIX}loop cola\` o \`${PREFIX}loop off\``);
+    }
+    player.loop = mode;
+    return ctx.reply(`Loop: ${loopLabels[mode]}`);
+  },
+
+  shuffle(ctx, _voiceChannel, player) {
+    player.shuffle = !player.shuffle;
+    return ctx.reply(player.shuffle ? '🔀 Modo aleatorio activado owo' : 'Modo aleatorio desactivado');
+  },
+
   nowplaying(ctx, _voiceChannel, player) {
     const { title, url, duration } = player.current;
-    return ctx.reply(`🎶 **${title}** \`${formatDuration(duration)}\`\n<${url}>`);
+    return ctx.reply(`${modesLine(player)}🎶 **${title}** \`${formatDuration(duration)}\`\n<${url}>`);
   },
 
   stop(ctx, _voiceChannel, player) {

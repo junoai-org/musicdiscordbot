@@ -51,6 +51,8 @@ Todos funcionan como comando de barra (`/play`) y con prefijo (`!play`).
 | `resume` | `!r` | Reanuda la música |
 | `queue` | `!q` | Muestra la cola |
 | `nowplaying` | `!np` | Muestra qué está sonando |
+| `loop [off\|cancion\|cola]` | `!repeat` | Repite la canción o toda la cola; sin opción, cambia al siguiente modo |
+| `shuffle` | `!random` | Activa o desactiva el modo aleatorio |
 | `stop` | | Detiene la música y vacía la cola |
 | `leave` | `!l` | Saca al bot del canal de voz |
 
